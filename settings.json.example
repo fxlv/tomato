@@ -1,0 +1,12 @@
+{
+ "pump_pin": 3,
+ "max_humidity": 500,
+ "low_humidity": 200,
+ "desired_humidity": 300,
+ "zabbix_server_name": "your zabbix ip here",
+ "zabbix_server_port": "zabbix port",
+ "zabbix_host_name": "Host name of the Host on which behalf to send data",
+ "zabbix_item_name": "item name",
+ "serial_port": "/dev/pts/1"
+}
+
