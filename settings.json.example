@@ -8,5 +8,8 @@
  "zabbix_host_name": "Host name of the Host on which behalf to send data",
  "zabbix_item_name": "item name",
  "serial_port": "/dev/pts/1"
+ "mqtt_host":"mqtt host to use",
+ "mqtt_pump_1": "mqtt topic corresponding to a pump",
+ "pump_type": "mqtt or gpio"
 }
 
