@@ -8,6 +8,7 @@ from loguru import logger
 import sys
 import json
 import subprocess
+import paho.mqtt.client as mqtt
 
 try:
     import RPi.GPIO as GPIO
@@ -31,23 +32,37 @@ def zabbix_sender(settings, value):
     zabbix_server_port = settings["zabbix_server_port"]
     zabbix_host_name = settings["zabbix_host_name"]
     zabbix_item_name = settings["zabbix_item_name"]
-    command = ["zabbix_sender", "-z", zabbix_server, "-p", zabbix_server_port, "-s", f"\"{zabbix_host_name}\"", "-k", zabbix_item_name, "-o", str(value), "-vv"]
+    command = ["zabbix_sender", "-z", zabbix_server, "-p", zabbix_server_port, "-s", zabbix_host_name, "-k", zabbix_item_name, "-o", str(value), "-vv"]
     logger.debug(f"Sending: {command}")
     subprocess.run(command)
 
-
-def pump(settings, pump_time=2):
+def pump(settings, mqtt_client, pump_time=2):
     now = datetime.datetime.now()
     global last_pump_time
     logger.debug(f"Preparing to pump. Last pump time {last_pump_time}")
-    pump_pin = settings["pump_pin"]
     if last_pump_time:
-        if ( now - last_pump_time ).total_seconds() < 1200:
+        if ( now - last_pump_time ).total_seconds() < 2400:
             logger.debug("Not enough time passed since last watering")
             zabbix_sender(settings, 0)
             return 0
+    now = datetime.datetime.now()
+    # extra watering in the afternoon at 15 and 19
+    if now.hour == 15:
+        pump_time = 15
+    if now.hour == 19:
+        pump_time = 15
+    logger.debug(f"Preparing to pump, pump time will be {pump_time}")
     last_pump_time= datetime.datetime.now()
     zabbix_sender(settings, 1)
+    if settings["pump_type"] == "mqtt":
+        pump_mqtt(settings, mqtt_client, pump_time)
+    else:
+        pump_gpio(settings, pump_time)
+    zabbix_sender(settings, 0)
+
+def pump_gpio(settings, pump_time=2):
+    pump_pin = settings["pump_pin"]
+    logger.debug(f"Pumping using GPIO for {pump_time}")
     logger.debug(f"Setting pump pin {pump_pin} to HIGH")
     GPIO.output(pump_pin, GPIO.HIGH)
     time.sleep(pump_time);
@@ -84,6 +99,20 @@ def set_up_gpio(settings):
     GPIO.setup(settings["pump_pin"], GPIO.OUT)
     GPIO.output(settings["pump_pin"], GPIO.LOW)
 
+def get_mqtt(settings):
+    client = mqtt.Client()
+    client.connect(settings["mqtt_host"], 1883, 60)
+    logger.debug("mqtt client connected")
+    return client
+
+def pump_mqtt(settings, client, pump_time=2):
+    logger.debug(f"Pumping using mqtt pump for {pump_time} seconds")
+    client.publish(settings["mqtt_pump_1"], '{"state":"ON"}')
+    time.sleep(pump_time)
+    client.publish(settings["mqtt_pump_1"], '{"state":"OFF"}')
+    logger.debug("Pumping complete")
+
+
 @click.command()
 @click.option("--debug", is_flag=True, default=False, help="Print DEBUG log to screen")
 def main(debug):
@@ -92,6 +121,9 @@ def main(debug):
     set_up_gpio(settings)
     last_successful_serial_comm = None
     startup_time = datetime.datetime.now()
+    mqtt_client = get_mqtt(settings)
+
+
 
     ser = serial.Serial(settings["serial_port"], 9600, timeout=3)
     while True:
@@ -101,9 +133,13 @@ def main(debug):
 
         if ser.is_open:
             logger.debug("Serial port is open")
-            line = ser.read(50)
-            line = line.decode("utf-8")
-            line = line.split("\r\n")
+            try:
+                line = ser.read(50)
+                line = line.decode("utf-8")
+                line = line.split("\r\n")
+            except:
+                logger.warning(f"Could not read line from serial. Line: {line}")
+                line = ""
             # if multiple lines were read, use the first one
             if len(line)>1:
                 line = line[0]
@@ -126,9 +162,17 @@ def main(debug):
                     soil_moisture_level = 0
                     water_tank_level = 0
                     continue
-                soil_moisture_level = int(line[0])
-                water_tank_level = int(line[1])
-                overflow = int(line[2])
+                try:
+                    soil_moisture_level = int(line[0])
+                    water_tank_level = int(line[1])
+                    overflow = int(line[2])
+                except ValueError:
+                    overflow = 0
+                    soil_moisture_level = 0
+                    water_tank_level = 0
+                    logger.debug("Invalid values extracted")
+                    continue
+
 
 
                 last_successful_serial_comm = datetime.datetime.now()
@@ -154,10 +198,10 @@ def main(debug):
                     if soil_moisture_level < settings["max_humidity"]:
                         if soil_moisture_level < settings["desired_humidity"]:
                             logger.debug(f"Moisture below the desired value: ({soil_moisture_level}), watering")
-                            pump(settings, 6)
+                            pump(settings, mqtt_client, 12)
                         elif soil_moisture_level > settings["desired_humidity"]:
                             logger.info(f"Moisture is above the desired humidity ({soil_moisture_level}), but below max. Minimum watering.")
-                            pump(settings, 2)
+                            pump(settings, mqtt_client, 6)
                     else:
                         logger.info(f"Moisture above max humidity: {soil_moisture_level}")
             else:
